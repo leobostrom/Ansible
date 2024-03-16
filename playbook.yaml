@@ -1,0 +1,127 @@
+- name: My first play
+  hosts: myhosts
+  tasks:
+    - name: Update all packages to their latest version
+      become: true
+      ansible.builtin.apt:
+        name: "*"
+        state: latest # noqa: package-latest
+
+    - name: Ensure PasswordAuthentication is set to no
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+      become: true
+
+    - name: Ensure group "sync" exists
+      become: true
+      ansible.builtin.group:
+        name: sync
+        state: present
+
+    - name: Add user 'sync'
+      become: true
+      ansible.builtin.user:
+        name: sync
+        comment: sync
+        uid: 1040
+        shell: /bin/bash
+        group: sync
+        home: /home/sync/
+        password: "$y$j9T$gAiPF.yeij.RFFZu.KYcO.$49dfHE2wwjPKUGIbXL1o3sL.o3mF.X.6YWwPoqfW8i1"
+
+    - name: Ensure sync user's .ssh directory exists
+      become: true
+      ansible.builtin.file:
+        owner: sync
+        group: sync
+        path: /home/sync/.ssh
+        state: directory
+        mode: '0700'
+
+    - name: Add private key to sync user's .ssh directory
+      become: true
+      ansible.builtin.copy:
+        owner: sync
+        group: sync
+        src: sync_key
+        dest: /home/sync/.ssh/id_ed25519
+        mode: '0700'
+
+    - name: Add public key to sync user's .ssh directory
+      become: true
+      ansible.builtin.copy:
+        owner: sync
+        group: sync
+        src: sync_key.pub
+        dest: /home/sync/.ssh/id_ed25519.pub
+        mode: '0700'
+
+    - name: Copy public key to authorized_keys
+      become: true
+      ansible.posix.authorized_key:
+        user: sync
+        key: "{{ lookup('file', 'sync_key.pub') }}"
+
+- name: How to find all other IP-addresses in a play
+  hosts: myhosts
+  become: true
+  tasks:
+    - name: Create variable from the output of ssh-keyscan
+      ansible.builtin.command:
+        cmd: "ssh-keyscan -H {{ ansible_default_ipv4.address }}"
+      changed_when: false
+      register: keyscan_output
+
+    - name: Publish the output of ssh-keyscan to all other hosts
+      ansible.builtin.set_fact:
+        known_hosts_lines: "{{ keyscan_output.stdout_lines }}"
+
+    - name: Add known_hosts lines to all other hosts
+      ansible.builtin.lineinfile:
+        path: /home/sync/.ssh/known_hosts
+        search_string: "{{ item | regex_search('\\S+ \\S+$') }}"
+        owner: sync
+        group: sync
+        mode: "0600"
+        line: "{{ item }}"
+        create: true
+      loop: "{{ ansible_play_hosts | difference([inventory_hostname]) | map('extract', hostvars) | map(attribute='known_hosts_lines') | flatten }}"
+
+- name: Create sync user's boxydrop directory exists
+  hosts: all
+  tasks:
+    - name: Create sync user's boxydrop directory
+      ansible.builtin.file:
+        owner: sync
+        group: sync
+        path: /boxydrop
+        state: directory
+        mode: '0775'
+      become: true
+
+    - name: Install unison
+      ansible.builtin.apt:
+        name: unison
+        state: present
+
+- name: Config Unison (Active nodes)
+  hosts: active
+  become: true
+  tasks:
+    - name: Write lines to Unison config file
+      ansible.builtin.lineinfile:
+        path: /home/sync/.unison/default.prf
+        line: "{{ item }}"
+      with_items:
+        - "auto=true"
+        - "batch=true"
+
+    - name: Set up cron job for unison
+      ansible.builtin.cron:
+        name: "Sync boxydrop directory"
+        user: sync
+        minute: "*"
+        job: "unison /boxydrop ssh://{{ groups['passive'] }}//boxydrop"
+      become: true
